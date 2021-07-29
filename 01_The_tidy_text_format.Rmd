@@ -1,0 +1,179 @@
+---
+title: "01 The tidy text format"
+author: "H. David Shea"
+date: "`r format(Sys.time(), '%d %b %Y')`"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    fig.align: center
+    fig_caption: yes
+    fig_height: 5
+    fig_width: 9
+    highlight: tango
+    theme: united
+    #toc: yes
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(patchwork)
+library(tidytext)
+library(janeaustenr)
+library(gutenbergr)
+library(scales)
+
+knitr::opts_chunk$set(
+    comment = "#>", 
+    collapse = TRUE, 
+    message = FALSE,
+    fig.width = 8,
+    fig.asp = ((1 + sqrt(5)) / 2) - 1, # the golden ratio - technically, the b proportion of a+b when a is 1
+    out.width = "70%",
+    fig.align = "center"
+)
+```
+
+## The `unnest_tokens` function
+
+```{r c1.2, include=TRUE}
+text <- c("Because I could not stop for Death -",
+          "He kindly stopped for me -",
+          "The Carriage held but just Ourselves -",
+          "and Immortality")
+
+text
+
+text_df <- tibble(line = 1:4, text = text)
+
+text_df
+
+text_df %>%
+  unnest_tokens(word, text)
+
+text_df %>%
+  unnest_tokens(word, text, to_lower = FALSE)
+```
+
+## Tidying the works of Jane Austen
+
+Get the text from all Jane Austen books, add fields for line number and chapter number.  The line number is obtained by a simple `row_number()` call.  The chapter number relies on a `cumsum` of each line that starts with the word 'chapter' followed by a space and then a number or any of the (smaller - i.e., no 'm' - not a lot of 1000 chapter books) Roman numeral letters - neat trick.
+
+NOTE: The `austen_books()` data are in text only format - exactly what we want - so no pre-processing is required.
+
+```{r c1.3a, include=TRUE}
+original_books <- austen_books() %>%
+    group_by(book) %>%
+    mutate(linenumber = row_number(),
+           chapter = cumsum(str_detect(
+               text,
+               regex("^chapter [\\divxlc]",
+                     ignore_case = TRUE)
+           ))) %>%
+    ungroup()
+
+original_books
+
+tidy_books <- original_books %>%
+  unnest_tokens(word, text)
+
+tidy_books
+```
+
+**Stop words** are words that are not usually useful for analyses.  These are the typically high frequency common words like 'the', 'of', 'to', etc.  The package `tidytext` contains a dataset `stop_words` containing several lexicons' versions of stop words.
+
+```{r c1.3b, include=TRUE}
+data(stop_words)
+
+tidy_books <- tidy_books %>%
+  anti_join(stop_words, by = "word")
+
+tidy_books %>%
+  count(word, sort = TRUE) 
+
+library(ggplot2)
+
+tidy_books %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 600) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+  geom_col() +
+  labs(y = NULL)
+```
+
+## The `gutenbergr` package
+
+[*Project Gutenberg*](https://www.gutenberg.org) is a library of over 60,000 free eBooks.  The `gutenbergr` package provides access to these books.  Here, we pull the data for some H.G. Wells books:  _The Time Machine_ (ID = 35), _The War of the Worlds_ (ID = 36), _The Invisible Man_ (ID = 5230), and _The Island of Doctor Moreau_ (ID = 159).  Then we do the same for works from the Bronte Sisters:  _Jane Eyre_ (ID = 1260), _Wuthering Heights_ (ID = 768), _The Tenant of Wildfell Hall_ (ID = 969), _Villette_ (ID = 9182), and _Agnes Grey_ (ID = 767).
+
+```{r c1.4, include=TRUE, warnings=FALSE}
+hgwells <- gutenberg_download(c(35, 36, 5230, 159))
+
+tidy_hgwells <- hgwells %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words, by = "word")
+
+tidy_hgwells %>%
+  count(word, sort = TRUE)
+
+bronte <- gutenberg_download(c(1260, 768, 969, 9182, 767))
+
+tidy_bronte <- bronte %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words, by = "word")
+
+tidy_bronte %>%
+  count(word, sort = TRUE)
+```
+
+## Word frequencies
+
+Now we calculate the frequency for each word for the collected work of the set of authors:  Jane Austen, the Bronte sisters, and H.G. Wells.  This makes good use of `tidverse` operations.
+
+NOTE:  The Project Gutenberg books have some examples of emphasized words indicated by underscores.  The `str_extract` below, makes sure that only letters and apostrophes are sampled, not the special characters.
+
+```{r c1.5a, include=TRUE}
+frequency <- bind_rows(mutate(tidy_bronte, author = "Brontë Sisters"),
+                       mutate(tidy_hgwells, author = "H.G. Wells"), 
+                       mutate(tidy_books, author = "Jane Austen")) %>% 
+  mutate(word = str_extract(word, "[a-z']+")) %>%
+  count(author, word) %>%
+  group_by(author) %>%
+  mutate(proportion = n / sum(n)) %>% 
+  select(-n) %>% 
+  pivot_wider(names_from = author, values_from = proportion) %>%
+  pivot_longer(`Brontë Sisters`:`H.G. Wells`,
+               names_to = "author", values_to = "proportion")
+
+frequency
+```
+
+And this can be used to make a frequency scatter plot to show words used at similar frequencies by the authors - words closer to the abline are similar in frequency.
+
+```{r c1.5b, include=TRUE}
+ggplot(frequency, aes(x = proportion, y = `Jane Austen`, 
+                      color = abs(`Jane Austen` - proportion))) +
+  geom_abline(color = "gray40", lty = 2) +
+  geom_jitter(alpha = 0.1, size = 2.5, width = 0.3, height = 0.3, na.rm = TRUE) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5, na.rm = TRUE) +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  scale_color_gradient(limits = c(0, 0.001), 
+                       low = "darkslategray4", high = "gray75") +
+  facet_wrap(~author, ncol = 2) +
+  theme(legend.position="none") +
+  labs(y = "Jane Austen", x = NULL)
+```
+
+Note the difference in shape between the two plots.  The Austen-Bronte plots shows more data points, points that are generally closer to the abline and more lower frequency words in common versus the Austen-Wells plot. This indicates that Jane Austen and the Bronte sisters used more similar words than Jane Austen and H.G. Wells did.
+
+This can be shown in correlation tests as well.
+
+```{r c1.5c, include=TRUE}
+cor.test(data = frequency[frequency$author == "Brontë Sisters",],
+         ~ proportion + `Jane Austen`)
+
+cor.test(data = frequency[frequency$author == "H.G. Wells",], 
+         ~ proportion + `Jane Austen`)
+```
