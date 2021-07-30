@@ -1,7 +1,6 @@
-# Text-Mining-Research
+# Text Mining Research
 
-Code examples and expansions from the book:  
-[Text Mining with R: A Tidy Approach](https://www.tidytextmining.com) by _Julia Silge_ and _David Robinson_.
+Code examples and expansions from the book:  [Text Mining with R: A Tidy Approach](https://www.tidytextmining.com) by _Julia Silge_ and _David Robinson_.
 
 Some of the code references the following cited lexicons:
 

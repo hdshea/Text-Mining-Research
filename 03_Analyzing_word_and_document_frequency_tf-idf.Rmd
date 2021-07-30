@@ -1,0 +1,258 @@
+---
+title: "03 Analyzing word and document frequency: tf-idf"
+author: "H. David Shea"
+date: "`r format(Sys.time(), '%d %b %Y')`"
+output:
+  pdf_document:
+    toc: yes
+    latex_engine: xelatex
+  html_document:
+    fig.align: center
+    fig_caption: yes
+    fig_height: 5
+    fig_width: 9
+    highlight: tango
+    theme: united
+    #toc: yes
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(knitr)
+library(tidytext)
+library(janeaustenr)
+library(gutenbergr)
+
+knitr::opts_chunk$set(
+    comment = "#>", 
+    collapse = TRUE, 
+    message = FALSE,
+    fig.width = 8,
+    fig.asp = ((1 + sqrt(5)) / 2) - 1, # the golden ratio - technically, the b proportion of a+b when a is 1
+    out.width = "70%",
+    fig.align = "center"
+)
+```
+
+In these exercises, we are focused on determining "what a document is about".  The approach is to look at _term frequency_ (tf) of words in a document - trying to determine which words are "important" in the text.  But some words - for instance, stop words - can be used frequently but may just occur naturally in high frequency.  So, an alternative is to look at _inverse document frequency_ (idf), where we decrease the weight for commonly used words and increase the weight of more infrequent words.  (Frequency here is measured over collections of documents.)
+
+"The statistic tf-idf is intended to measure how important a word is to a document in a collection (or corpus) of documents, for example, to one novel in a collection of novels or to one website in a collection of websites."
+
+$$idf(\text{term}) = \ln{\left(\frac{n_{\text{documents}}}{n_{\text{documents containing term}}}\right)}$$
+
+## Term frequency in Jane Austen’s novels
+
+Word count per novel.
+
+```{r c3.1a, include=TRUE}
+book_words <- austen_books() %>%
+    unnest_tokens(word, text) %>%
+    count(book, word, sort = TRUE)
+
+total_words <- book_words %>%
+    group_by(book) %>%
+    summarize(total = sum(n))
+
+book_words <- left_join(book_words, total_words, by = "book")
+
+book_words %>% 
+    slice_max(n, n = 10) %>% 
+    kable()
+```
+
+Term frequency per novel.
+
+```{r c3.1b, include=TRUE, fig.cap="Term frequency distribution in Jane Austen's novels"}
+ggplot(book_words, aes(n / total, fill = book)) +
+    geom_histogram(show.legend = FALSE, na.rm = TRUE) +
+    xlim(NA, 0.0009) +
+    facet_wrap( ~ book, ncol = 2, scales = "free_y") + 
+    theme_light()
+```
+
+Note:  the distribution is similar across all novels - "many words that occur rarely and fewer words that occur frequently".
+
+## Zipf’s law
+
+"Zipf’s law states that the frequency that a word appears is inversely proportional to its rank."
+
+```{r c3.2a, include=TRUE}
+freq_by_rank <- book_words %>%
+    group_by(book) %>%
+    mutate(rank = row_number(),
+           `term frequency` = n / total) %>%
+    ungroup()
+
+freq_by_rank %>% 
+    slice_max(n, n = 10) %>% 
+    kable()
+```
+
+We can visualize Zipf's law in a plot of term frequency versus rank.
+
+```{r c3.2b, include=TRUE, fig.cap="Zipf's law for Jane Austen's novels"}
+freq_by_rank %>%
+    ggplot(aes(rank, `term frequency`, color = book)) +
+    geom_line(size = 1.1,
+              alpha = 0.8,
+              show.legend = FALSE) +
+    scale_x_log10() +
+    scale_y_log10()
+```
+
+In log-log scale, we can see that the novels are similar, but the negative slope is not constant - as you'd see if a power law relationship applied.  But the "middle" of this distribution does seem more constant.  And, indeed, thje slope there is close to `-1`.
+
+```{r c3.2c, include=TRUE}
+rank_subset <- freq_by_rank %>%
+    filter(rank < 500,
+           rank > 10)
+
+rank_lm <- lm(log10(`term frequency`) ~ log10(rank), data = rank_subset)
+rank_lm
+
+freq_by_rank %>%
+    ggplot(aes(rank, `term frequency`, color = book)) +
+    geom_abline(
+        intercept = rank_lm$coefficients[1],
+        slope = rank_lm$coefficients[2],
+        color = "gray50",
+        linetype = 2
+    ) +
+    geom_line(size = 1.1,
+              alpha = 0.8,
+              show.legend = FALSE) +
+    scale_x_log10() +
+    scale_y_log10() +
+    theme_light()
+```
+
+"The deviations we see here at high rank are not uncommon for many kinds of language; a corpus of language often contains fewer rare words than predicted by a single power law. The deviations at low rank are more unusual. Jane Austen uses a lower percentage of the most common words than many collections of language."
+
+## The `bind_tf_idf()` function
+
+```{r c3.3a, include=TRUE}
+book_tf_idf <- book_words %>%
+    bind_tf_idf(word, book, n)
+
+book_tf_idf %>% 
+    slice_max(n, n = 10) %>% 
+    kable()
+```
+
+"Notice that idf and thus tf-idf are zero for these extremely common words. These are all words that appear in all six of Jane Austen’s novels, so the idf term (which will then be the natural log of 1) is zero."
+
+The high tf-idf words are shown like this.
+
+```{r c3.3b, include=TRUE, out.width="90%"}
+book_tf_idf %>%
+    select(-total) %>%
+    arrange(desc(tf_idf)) %>% 
+    slice_max(tf_idf, n = 10) %>% 
+    kable()
+
+book_tf_idf %>%
+    group_by(book) %>%
+    slice_max(tf_idf, n = 15) %>%
+    ungroup() %>%
+    ggplot(aes(tf_idf, fct_reorder(word, tf_idf), fill = book)) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap( ~ book, ncol = 2, scales = "free") +
+    labs(x = "tf-idf", y = NULL) +
+    theme_light() +
+    theme(axis.text = element_text(size = 7))
+```
+
+"What measuring tf-idf has done here is show us that Jane Austen used similar language across her six novels, and what distinguishes one novel from the rest within the collection of her works are the proper nouns, the names of people and places. This is the point of tf-idf; it identifies words that are important to one document within a collection of documents."
+
+## A corpus of physics texts
+
+The following analyses uses some classis physics text available from [*Project Gutenberg*](https://www.gutenberg.org).  We will use _Discourse on Floating Bodies_ by Galileo Galilei (ID = 37729), _Treatise on Light_ by Christiaan Huygens (ID = 14725), _Experiments with Alternate Currents of High Potential and High Frequency_ by Nikola Tesla (ID = 13476), and _Relativity: The Special and General Theory_ by Albert Einstein (ID = 30155).
+
+```{r c3.4a, include=TRUE}
+physics <- gutenberg_download(c(37729, 14725, 13476, 30155),
+                              meta_fields = "author")
+
+physics_words <- physics %>%
+  unnest_tokens(word, text) %>%
+  count(author, word, sort = TRUE)
+
+physics_words %>% 
+    slice_max(n, n = 10) %>%
+    kable()
+
+plot_physics <- physics_words %>%
+    bind_tf_idf(word, author, n) %>%
+    mutate(author = factor(
+        author,
+        levels = c(
+            "Galilei, Galileo",
+            "Huygens, Christiaan",
+            "Tesla, Nikola",
+            "Einstein, Albert"
+        )
+    ))
+
+plot_physics %>%
+    group_by(author) %>%
+    slice_max(tf_idf, n = 15) %>%
+    ungroup() %>%
+    mutate(word = reorder(word, tf_idf)) %>%
+    ggplot(aes(tf_idf, word, fill = author)) +
+    geom_col(show.legend = FALSE) +
+    labs(x = "tf-idf", y = NULL) +
+    facet_wrap( ~ author, ncol = 2, scales = "free") +
+    theme_light()
+```
+
+In the examples, we see some technical terms ('_k_', 'AB', "RC', etc.) that we might want to "clean up".  And we see that the term 'co-ordinate' was broken up by the tokenizer into 'co' and 'ordinate'.  We "clean up" these terms below.
+
+```{r c3.4b, include=TRUE}
+physics %>%
+    filter(str_detect(text, "_k_")) %>%
+    select(text) %>%
+    slice_sample(n = 10) %>%
+    kable()
+
+physics %>%
+    filter(str_detect(text, "RC")) %>%
+    select(text) %>%
+    slice_sample(n = 10) %>%
+    kable()
+
+mystopwords <- tibble(
+    word = c(
+        "eq", "co", "rc", "ac", "ak",
+        "bn", "fig", "file", "cg", "cb",
+        "cm", "ab", "_k", "_k_", "_x"
+    )
+)
+
+physics_words <- anti_join(physics_words, mystopwords,
+                           by = "word")
+
+plot_physics <- physics_words %>%
+    bind_tf_idf(word, author, n) %>%
+    mutate(word = str_remove_all(word, "_")) %>%
+    group_by(author) %>%
+    slice_max(tf_idf, n = 15) %>%
+    ungroup() %>%
+    mutate(word = reorder_within(word, tf_idf, author)) %>%
+    mutate(author = factor(
+        author,
+        levels = c(
+            "Galilei, Galileo",
+            "Huygens, Christiaan",
+            "Tesla, Nikola",
+            "Einstein, Albert"
+        )
+    ))
+
+ggplot(plot_physics, aes(word, tf_idf, fill = author)) +
+    geom_col(show.legend = FALSE) +
+    labs(x = NULL, y = "tf-idf") +
+    facet_wrap( ~ author, ncol = 2, scales = "free") +
+    coord_flip() +
+    scale_x_reordered() +
+    theme_light()
+```
+

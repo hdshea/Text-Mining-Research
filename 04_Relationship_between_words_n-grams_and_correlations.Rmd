@@ -1,0 +1,356 @@
+---
+title: "04 Relationships between words: n-grams and correlations"
+author: "H. David Shea"
+date: "`r format(Sys.time(), '%d %b %Y')`"
+output:
+  pdf_document:
+    toc: yes
+    latex_engine: xelatex
+  html_document:
+    fig.align: center
+    fig_caption: yes
+    fig_height: 5
+    fig_width: 9
+    highlight: tango
+    theme: united
+    #toc: yes
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(knitr)
+library(tidytext)
+library(janeaustenr)
+library(gutenbergr)
+library(igraph)
+library(ggraph)
+library(widyr)
+
+knitr::opts_chunk$set(
+    comment = "#>", 
+    collapse = TRUE, 
+    message = FALSE,
+    fig.width = 8,
+    fig.asp = ((1 + sqrt(5)) / 2) - 1, # the golden ratio - technically, the b proportion of a+b when a is 1
+    out.width = "70%",
+    fig.align = "center"
+)
+```
+
+Now, we focus on relationships between words in a document - which words tend to occur together (immediate vicinity) or co-occur in the same document.  An 'n-gram' is a token of "adjacent words".
+
+## Tokenizing by n-gram
+
+### Counting and filtering n-grams
+
+```{r c4.1.1, include=TRUE}
+austen_bigrams <- austen_books() %>%
+    unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+austen_bigrams %>%
+    slice_sample(n = 10) %>%
+    kable()
+
+austen_bigrams %>%
+    count(bigram, sort = TRUE) %>%
+    slice_max(n, n = 10) %>%
+    kable()
+
+bigrams_separated <- austen_bigrams %>%
+    separate(bigram, c("word1", "word2"), sep = " ")
+
+bigrams_filtered <- bigrams_separated %>%
+    filter(!word1 %in% stop_words$word) %>%
+    filter(!word2 %in% stop_words$word)
+
+# new bigram counts:
+bigram_counts <- bigrams_filtered %>%
+    count(word1, word2, sort = TRUE)
+
+bigram_counts %>%
+    slice_max(n, n = 10) %>%
+    kable()
+
+bigrams_united <- bigrams_filtered %>%
+    unite(bigram, word1, word2, sep = " ")
+
+bigrams_united %>% 
+    slice_sample(n = 10) %>% 
+    kable()
+
+austen_books() %>%
+    unnest_tokens(trigram, text, token = "ngrams", n = 3) %>%
+    separate(trigram, c("word1", "word2", "word3"), sep = " ") %>%
+    filter(!word1 %in% stop_words$word,!word2 %in% stop_words$word,!word3 %in% stop_words$word) %>%
+    count(word1, word2, word3, sort = TRUE) %>%
+    slice_max(n, n = 10) %>%
+    kable()
+```
+
+### Analyzing bigrams
+
+```{r c4.1.2a, include=TRUE}
+bigrams_filtered %>%
+  filter(word2 == "street") %>%
+  count(book, word1, sort = TRUE) %>% 
+    slice_max(n, n = 10) %>% 
+    kable(caption = "Most Common 'Street' Names in Jane Austen's Novels")
+
+bigram_tf_idf <- bigrams_united %>%
+  count(book, bigram) %>%
+  bind_tf_idf(bigram, book, n) %>%
+  arrange(desc(tf_idf))
+
+bigram_tf_idf %>% 
+    slice_max(tf_idf, n = 10) %>% 
+    kable(caption = "tf-idf or Bigrams in Jane Austen's Novels")
+```
+
+```{r c4.1.2b, include=TRUE, out.width="90%", fig.cap="Bigrams with the highest tf-idf from each Jane Austen novel"}
+bigram_tf_idf %>%
+    group_by(book) %>%
+    slice_max(tf_idf, n = 15) %>%
+    ungroup() %>%
+    ggplot(aes(tf_idf, fct_reorder(bigram, tf_idf), fill = book)) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap( ~ book, ncol = 2, scales = "free") +
+    labs(x = "tf-idf", y = NULL) +
+    theme_light() +
+    theme(axis.text = element_text(size = 7))
+```
+
+"There are advantages and disadvantages to examining the tf-idf of bigrams rather than individual words. Pairs of consecutive words might capture structure that isn’t present when one is just counting single words, and may provide context that makes tokens more understandable."
+
+"However, the per-bigram counts are also sparser: a typical two-word pair is rarer than either of its component words. Thus, bigrams can be especially useful when you have a very large text dataset."
+
+### Using bigrams to provide context in sentiment analysis
+
+Bigrams can help get at true context for terms like 'not happy', for instance.
+
+```{r c4.1.3a, include=TRUE}
+bigrams_separated %>%
+    filter(word1 == "not") %>%
+    count(word1, word2, sort = TRUE) %>%
+    slice_max(n, n = 10) %>%
+    kable(caption = "Words preceeded by 'not' in in Jane Austen's Novels")
+
+AFINN <- get_sentiments("afinn")
+
+not_words <- bigrams_separated %>%
+    filter(word1 == "not") %>%
+    inner_join(AFINN, by = c(word2 = "word")) %>%
+    count(word2, value, sort = TRUE)
+
+not_words %>%
+    slice_max(n, n = 10) %>% 
+    kable(caption = "Sentiment value of words preceeded by 'not' in in Jane Austen's Novels")
+```
+
+We can calculater (and visualize) the sentiment impact of words that contribute in the 'wrong' direction to sentiment.  Here `contribution` is the sentiment value of the word times the number of times the word appeared in the text preceded by 'not'.
+
+```{r c4.1.3b, include=TRUE, fig.cap="Words preceded by ‘not’ that had the greatest contribution to sentiment values, in either a positive or negative direction"}
+not_words %>%
+    mutate(contribution = n * value) %>%
+    arrange(desc(abs(contribution))) %>%
+    head(20) %>%
+    mutate(word2 = reorder(word2, contribution)) %>%
+    ggplot(aes(n * value, word2, fill = n * value > 0)) +
+    geom_col(show.legend = FALSE) +
+    labs(x = "Sentiment value * number of occurrences",
+         y = "Words preceded by \"not\"") +
+    theme_light()
+```
+
+We can expand to more 'negated words' beyond just 'not'.
+
+```{r c4.1.3c, include=TRUE, fig.cap="Most common positive or negative words to follow negations such as ‘never’, ‘no’, ‘not’, and ‘without’"}
+negation_words <- c("not", "no", "never", "without")
+
+negated_words <- bigrams_separated %>%
+    filter(word1 %in% negation_words) %>%
+    inner_join(AFINN, by = c(word2 = "word")) %>%
+    count(word1, word2, value, sort = TRUE)
+
+negated_words %>%
+    mutate(contribution = n * value,
+           word2 = reorder(paste(word2, word1, sep = "__"), contribution)) %>%
+    group_by(word1) %>%
+    slice_max(abs(contribution), n = 12, with_ties = FALSE) %>%
+    ggplot(aes(word2, contribution, fill = n * value > 0)) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap( ~ word1, scales = "free") +
+    scale_x_discrete(
+        labels = function(x)
+            gsub("__.+$", "", x)
+    ) +
+    xlab("Words preceded by negation term") +
+    ylab("Sentiment value * # of occurrences") +
+    coord_flip() +
+    theme_light()
+```
+
+### Visualizing a network of bigrams with `ggraph`
+
+```{r c4.1.43a, include=TRUE, fig.cap="Common bigrams in Jane Austen’s novels, showing those that occurred more than 20 times and where neither word was a stop word"}
+bigram_counts %>%
+    slice_max(n, n = 10) %>%
+    kable()
+
+bigram_graph <- bigram_counts %>%
+    filter(n > 20) %>%
+    graph_from_data_frame()
+
+bigram_graph
+
+set.seed(2017)
+
+ggraph(bigram_graph, layout = "fr") +
+    geom_edge_link() +
+    geom_node_point() +
+    geom_node_text(aes(label = name), vjust = 1, hjust = 1)
+```
+
+Note in the graph that proper title ("miss", "sir", etc.) are common centers of nodes.  We also see common short phrases like 'half hour' and 'maple grove'.
+
+```{r c4.1.43b, include=TRUE, fig.cap="Common bigrams in Jane Austen’s novels, with some polishing"}
+set.seed(2020)
+
+a <- grid::arrow(type = "closed", length = unit(.15, "inches"))
+
+ggraph(bigram_graph, layout = "fr") +
+    geom_edge_link(
+        aes(edge_alpha = n),
+        show.legend = FALSE,
+        arrow = a,
+        end_cap = circle(.07, 'inches')
+    ) +
+    geom_node_point(color = "lightblue", size = 5) +
+    geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+    theme_void()
+```
+
+"Note that this is a visualization of a Markov chain, a common model in text processing. In a Markov chain, each choice of word depends only on the previous word. In this case, a random generator following this model might spit out “dear”, then “sir”, then “william/walter/thomas/thomas’s”, by following each word to the most common words that follow it. To make the visualization interpretable, we chose to show only the most common word to word connections, but one could imagine an enormous graph representing all connections that occur in the text."
+
+### Visualizing bigrams in other texts
+
+First, some useful shortcut functions.
+
+```{r c4.1.5a, include=TRUE}
+count_bigrams <- function(dataset, .stop_words = stop_words) {
+    dataset %>%
+        unnest_tokens(bigram, text, token = "ngrams", n = 2) %>%
+        separate(bigram, c("word1", "word2"), sep = " ") %>%
+        filter(!word1 %in% .stop_words$word,!word2 %in% .stop_words$word) %>%
+        count(word1, word2, sort = TRUE)
+}
+
+visualize_bigrams <- function(bigrams) {
+    set.seed(2016)
+    a <- grid::arrow(type = "closed", length = unit(.15, "inches"))
+    
+    bigrams %>%
+        graph_from_data_frame() %>%
+        ggraph(layout = "fr") +
+        geom_edge_link(aes(edge_alpha = n),
+                       show.legend = FALSE,
+                       arrow = a) +
+        geom_node_point(color = "lightblue", size = 5) +
+        geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+        theme_void()
+}
+```
+
+Visualizing the bigrams in the King James Version of the bible (ID = 10) from [*Project Gutenberg*](https://www.gutenberg.org).
+
+```{r c4.1.5b, include=TRUE, fig.cap="Directed graph of common bigrams in the King James Bible, showing those that occurred more than 40 times"}
+# the King James version is book 10 on Project Gutenberg:
+kjv <- gutenberg_download(10)
+
+kjv_bigrams <- kjv %>%
+    count_bigrams()
+
+# filter out rare combinations, as well as digits
+kjv_bigrams %>%
+    filter(n > 40,!str_detect(word1, "\\d"),!str_detect(word2, "\\d")) %>%
+    visualize_bigrams()
+```
+
+## Counting and correlating pairs of words with the widyr package
+
+We can also look at words that tend to occur together within documents or parts of documents, whether they are next to each other or not.
+
+### Counting and correlating among sections
+
+We look at _Pride and Prejudice_ divided into 10-line sections.
+
+```{r c4.2.1a, include=TRUE}
+austen_section_words <- austen_books() %>%
+    filter(book == "Pride & Prejudice") %>%
+    mutate(section = row_number() %/% 10) %>%
+    filter(section > 0) %>%
+    unnest_tokens(word, text) %>%
+    filter(!word %in% stop_words$word)
+
+austen_section_words %>% 
+    slice_sample(n = 10) %>% 
+    kable(caption = "10-Line Sections from _Pride & Prejudice_")
+
+# count words co-occuring within sections
+word_pairs <- austen_section_words %>%
+    pairwise_count(word, section, sort = TRUE)
+
+word_pairs %>%
+    slice_max(n, n = 10) %>%
+    kable(caption = "Word Pairs per 10-Line Section in _Pride & Prejudice_")
+
+word_pairs %>%
+  filter(item1 == "darcy") %>%
+    slice_max(n, n = 10) %>%
+    kable(caption = "Word that Co-Occur with 'Darcy' per 10-Line Section in _Pride & Prejudice_")
+```
+
+### Pairwise correlation
+
+```{r c4.2.2a, include=TRUE}
+# we need to filter for at least relatively common words first
+word_cors <- austen_section_words %>%
+    group_by(word) %>%
+    filter(n() >= 20) %>%
+    pairwise_cor(word, section, sort = TRUE)
+
+word_cors %>%
+    slice_max(correlation, n = 10) %>%
+    kable(caption = "Word Pair Correlation per 10-Line Section in _Pride & Prejudice_")
+
+word_cors %>%
+  filter(item1 == "pounds") %>%
+    slice_max(correlation, n = 10) %>%
+    kable(caption = "Word Pair - including 'pounds' - Correlation per 10-Line Section in _Pride & Prejudice_")
+```
+
+```{r c4.2.2b, include=TRUE, fig.cap="Words from _Pride and Prejudice_ that were most correlated with ‘elizabeth’, ‘pounds’, ‘married’, and ‘pride’"}
+word_cors %>%
+    filter(item1 %in% c("elizabeth", "pounds", "married", "pride")) %>%
+    group_by(item1) %>%
+    slice_max(correlation, n = 6) %>%
+    ungroup() %>%
+    mutate(item2 = reorder(item2, correlation)) %>%
+    ggplot(aes(item2, correlation)) +
+    geom_bar(stat = "identity") +
+    facet_wrap( ~ item1, scales = "free") +
+    coord_flip() +
+    theme_light()
+```
+
+```{r c4.2.2c, include=TRUE, fig.cap="Pairs of words in _Pride and Prejudice_ that show at least a .15 correlation of appearing within the same 10-line section"}
+set.seed(2016)
+
+word_cors %>%
+    filter(correlation > .15) %>%
+    graph_from_data_frame() %>%
+    ggraph(layout = "fr") +
+    geom_edge_link(aes(edge_alpha = correlation), show.legend = FALSE) +
+    geom_node_point(color = "lightblue", size = 5) +
+    geom_node_text(aes(label = name), repel = TRUE) +
+    theme_void()
+```
