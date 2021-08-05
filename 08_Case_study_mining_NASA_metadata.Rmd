@@ -1,0 +1,436 @@
+---
+title: "08 Case study: mining NASA metadata"
+author: "H. David Shea"
+date: "`r format(Sys.time(), '%d %b %Y')`"
+output:
+  html_document:
+    fig.align: center
+    fig_caption: yes
+    fig_height: 5
+    fig_width: 9
+    highlight: tango
+    theme: united
+    #toc: yes
+  pdf_document:
+    toc: yes
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(tidytext)
+library(jsonlite)
+library(widyr)
+library(igraph)
+library(ggraph)
+library(topicmodels)
+
+knitr::opts_chunk$set(
+    comment = "#>", 
+    collapse = TRUE, 
+    message = FALSE,
+    fig.width = 8,
+    fig.asp = ((1 + sqrt(5)) / 2) - 1, # the golden ratio - technically, the b proportion of a+b when a is 1
+    out.width = "70%",
+    fig.align = "center"
+)
+```
+
+## How data is organized at NASA
+
+```{r c8.1, include=TRUE}
+# pulling NASA metadata takes a long time - saved to .rds file to speed up processing
+if(file.exists("data/metadata.rda")) {
+    load("data/metadata.rda")
+} else {
+    metadata <- fromJSON("https://data.nasa.gov/data.json")
+    save(metadata, file = "data/metadata.rda")
+}
+
+names(metadata$dataset)
+
+class(metadata$dataset$title)
+
+class(metadata$dataset$description)
+
+class(metadata$dataset$keyword)
+```
+
+### Wrangling and tidying the data
+
+```{r c8.1.1, include=TRUE}
+nasa_title <- tibble(id = metadata$dataset$`_id`$`$oid`,
+                     title = metadata$dataset$title)
+
+nasa_title %>%
+    slice_head(n = 10)
+
+nasa_desc <- tibble(id = metadata$dataset$`_id`$`$oid`,
+                    desc = metadata$dataset$description)
+
+nasa_desc %>%
+    select(desc) %>%
+    slice_sample(n = 5)
+
+nasa_keyword <- tibble(id = metadata$dataset$`_id`$`$oid`,
+                       keyword = metadata$dataset$keyword) %>%
+    unnest(keyword)
+
+nasa_keyword
+
+nasa_title <- nasa_title %>%
+    unnest_tokens(word, title) %>%
+    anti_join(stop_words, by = "word")
+
+nasa_title
+
+nasa_desc <- nasa_desc %>%
+    unnest_tokens(word, desc) %>%
+    anti_join(stop_words, by = "word")
+
+nasa_desc
+```
+
+### Some initial simple exploration
+
+```{r c8.1.2, include=TRUE}
+nasa_title %>%
+    count(word, sort = TRUE) %>%
+    slice_max(n, n = 10, with_ties = FALSE) %>%
+    kable(caption = "Most common words in titles")
+
+nasa_desc %>%
+    count(word, sort = TRUE) %>%
+    slice_max(n, n = 10, with_ties = FALSE) %>%
+    kable(caption = "Most common words in descriptions")
+
+my_stopwords <- tibble(word = c(as.character(1:10), 
+                                "v1", "v1.0", "v03", "l2", "l3", "l4", "v5.2.0", "0.5", 
+                                "v003", "v004", "v005", "v006", "v7", "ii"))
+nasa_title <- nasa_title %>%
+    anti_join(my_stopwords, by = "word")
+
+nasa_desc <- nasa_desc %>%
+    anti_join(my_stopwords, by = "word")
+
+nasa_keyword %>%
+    count(keyword, sort = TRUE) %>%
+    slice_max(n, n = 10, with_ties = FALSE) %>%
+    kable(caption = "Most common keywords")
+
+nasa_keyword <- nasa_keyword %>% 
+  mutate(keyword = tolower(keyword))
+```
+
+## Word co-ocurrences and correlations
+
+We examine which words commonly occur together in the titles, descriptions, and keywords of NASA datasets.
+Then, we can examine word networks for each showing which datasets might be related.
+
+### Networks of Description and Title Words
+
+```{r c8.2.1a, include=TRUE, warning=FALSE}
+title_word_pairs <- nasa_title %>%
+    pairwise_count(word, id, sort = TRUE, upper = FALSE)
+
+title_word_pairs %>% 
+    slice_max(n, n = 10, with_ties = FALSE) %>% 
+    kable(caption = "Most frequent word pairs in titles")
+
+desc_word_pairs <- nasa_desc %>%
+    pairwise_count(word, id, sort = TRUE, upper = FALSE)
+
+desc_word_pairs %>% 
+    slice_max(n, n = 10, with_ties = FALSE) %>% 
+    kable(caption = "Most frequent word pairs in descriptions")
+```
+
+```{r c8.2.1b, include=TRUE, warning=FALSE, fig.cap="Word network in NASA dataset titles"}
+set.seed(1234)
+title_word_pairs %>%
+    filter(n >= 250) %>%
+    graph_from_data_frame() %>%
+    ggraph(layout = "fr") +
+    geom_edge_link(aes(edge_alpha = n, edge_width = n), edge_colour = "cyan4") +
+    geom_node_point(size = 5) +
+    geom_node_text(aes(label = name),
+                   repel = TRUE,
+                   point.padding = unit(0.2, "lines")) +
+    theme_void()
+```
+
+```{r c8.2.1c, include=TRUE, warning=FALSE, fig.cap="Word network in NASA dataset descriptions"}
+set.seed(1234)
+desc_word_pairs %>%
+    filter(n >= 5000) %>%
+    graph_from_data_frame() %>%
+    ggraph(layout = "fr") +
+    geom_edge_link(aes(edge_alpha = n, edge_width = n), edge_colour = "darkred") +
+    geom_node_point(size = 5) +
+    geom_node_text(aes(label = name),
+                   repel = TRUE,
+                   point.padding = unit(0.2, "lines")) +
+    theme_void()
+```
+
+### Networks of Description and Title Words
+
+```{r c8.2.2a, include=TRUE, warning=FALSE, fig.cap=" Co-occurrence network in NASA dataset keywords"}
+keyword_pairs <- nasa_keyword %>%
+    pairwise_count(keyword, id, sort = TRUE, upper = FALSE)
+
+keyword_pairs %>%
+    slice_max(n, n = 10, with_ties = FALSE) %>%
+    kable(caption = "Most frequent keyword pairs")
+
+set.seed(1234)
+keyword_pairs %>%
+    filter(n >= 700) %>%
+    graph_from_data_frame() %>%
+    ggraph(layout = "fr") +
+    geom_edge_link(aes(edge_alpha = n, edge_width = n), edge_colour = "royalblue") +
+    geom_node_point(size = 5) +
+    geom_node_text(aes(label = name),
+                   repel = TRUE,
+                   point.padding = unit(0.2, "lines")) +
+    theme_void()
+```
+
+```{r c8.2.2b, include=TRUE, warning=FALSE, fig.cap=" Correlation network in NASA dataset keywords"}
+keyword_cors <- nasa_keyword %>% 
+  group_by(keyword) %>%
+  filter(n() >= 50) %>%
+  pairwise_cor(keyword, id, sort = TRUE, upper = FALSE)
+
+keyword_cors %>%
+    slice_max(correlation, n = 10, with_ties = FALSE) %>%
+    kable(caption = "Highest correlations in keyword pairs")
+
+set.seed(1234)
+keyword_cors %>%
+    filter(correlation > .6) %>%
+    graph_from_data_frame() %>%
+    ggraph(layout = "fr") +
+    geom_edge_link(aes(edge_alpha = correlation, edge_width = correlation),
+                   edge_colour = "royalblue") +
+    geom_node_point(size = 5) +
+    geom_node_text(aes(label = name),
+                   repel = TRUE,
+                   point.padding = unit(0.2, "lines")) +
+    theme_void()
+```
+
+## Calculating tf-idf for the description fields
+
+We apply the tf-idf approach to the description fields of these NASA datasets.
+
+### What is tf-idf for the description field words?
+
+```{r c8.3.1a, include=TRUE}
+desc_tf_idf <- nasa_desc %>%
+    count(id, word, sort = TRUE) %>%
+    ungroup() %>%
+    bind_tf_idf(word, id, n)
+
+desc_tf_idf %>%
+    arrange(-tf_idf) %>%
+    slice_max(tf_idf, n = 10, with_ties = FALSE) %>%
+    kable(caption = "Highest tf-idf values for descrition fields")
+```
+
+"Notice we have run into an issue here; both \$n$ and term frequency are equal to 1 for these terms, meaning that these were description fields that only had a single word in them. If a description field only contains one word, the tf-idf algorithm will think that is a very important word."
+
+"Depending on our analytic goals, it might be a good idea to throw out all description fields that have very few words."
+
+```{r c8.3.1b, include=TRUE}
+desc_tf_idf %>%
+    filter(n > 3, tf != 1) %>% 
+    arrange(-tf_idf) %>%
+    slice_max(tf_idf, n = 10, with_ties = FALSE) %>%
+    kable(caption = "Highest tf-idf values for descrition fields (n > 3 and tf != 1)")
+```
+
+### Connecting description fields to keywords
+
+```{r c8.3.2a, include=TRUE, fig.cap="Distribution of tf-idf for words from datasets labeled with selected keywords", out.width="80%"}
+desc_tf_idf <- full_join(desc_tf_idf, nasa_keyword, by = "id")
+
+desc_tf_idf %>%
+    filter(!near(tf, 1)) %>%
+    filter(
+        keyword %in% c(
+            "solar activity",
+            "clouds",
+            "seismology",
+            "astrophysics",
+            "human health",
+            "budget"
+        )
+    ) %>%
+    arrange(desc(tf_idf)) %>%
+    group_by(keyword) %>%
+    distinct(word, keyword, .keep_all = TRUE) %>%
+    slice_max(tf_idf, n = 15, with_ties = FALSE) %>%
+    ungroup() %>%
+    mutate(word = factor(word, levels = rev(unique(word)))) %>%
+    ggplot(aes(tf_idf, word, fill = keyword)) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap( ~ keyword, ncol = 3, scales = "free") +
+    labs(
+        title = "Highest tf-idf words in NASA metadata description fields",
+        caption = "NASA metadata from https://data.nasa.gov/data.json",
+        x = "tf-idf",
+        y = NULL
+    ) +
+    theme_light()
+```
+
+## Topic modeling
+
+We use topic modeling to model each document description field as a mixture of topics and each topic as a mixture of words.  We will use LDA for our topic modeling.
+
+### Casting to a document-term matrix
+
+```{r c8.4.1a, include=TRUE}
+my_stop_words <- bind_rows(stop_words, 
+                           tibble(word = c("nbsp", "amp", "gt", "lt",
+                                           "timesnewromanpsmt", "font",
+                                           "td", "li", "br", "tr", "quot",
+                                           "st", "img", "src", "strong",
+                                           "http", "file", "files",
+                                           as.character(1:12)), 
+                                  lexicon = rep("custom", 30)))
+
+word_counts <- nasa_desc %>%
+  anti_join(my_stop_words, by = "word") %>%
+  count(id, word, sort = TRUE) %>%
+  ungroup()
+
+word_counts %>% 
+    slice_max(n, n = 10, with_ties = FALSE) %>% 
+    kable(caption = "Highest word count in decsriptions - stop words removed")
+
+desc_dtm <- word_counts %>%
+  cast_dtm(id, word, n)
+
+desc_dtm
+```
+
+### Ready for topic modeling
+
+To determine the number of topics to use, the authors tested increments of 8 from 8 to 64.  They found that at 24, documents were still getting sorted into topics cleanly.  Higher numbers produced flatter, less discerning distributions of gamma.
+
+```{r c8.4.2a, include=TRUE}
+# running a 24 topic LDA on this data takes a long time - saved to .rds file to speed up processing
+if(file.exists("data/desc_lda.rda")) {
+    load(file = "data/desc_lda.rda")
+} else {
+    desc_lda <- LDA(desc_dtm, k = 24, control = list(seed = 1234))
+    save(desc_lda, file = "data/desc_lda.rda")
+}
+
+desc_lda
+```
+
+### Interpreting the topic model
+
+```{r c8.4.3a, include=TRUE}
+tidy_lda <- tidy(desc_lda, matrix = "beta")
+
+tidy_lda %>% 
+    slice_head(n = 10) %>% 
+    kable()
+
+top_terms <- tidy_lda %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 10, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+top_terms %>% 
+    slice_head(n = 10) %>% 
+    kable(caption = "Top terms by beta")
+```
+
+```{r c8.4.3b, include=TRUE, fig.cap="Top terms in topic modeling of NASA metadata description field texts", fig.width=10, fig.height=16, fig.asp=1}
+top_terms %>%
+    mutate(term = reorder_within(term, beta, topic)) %>%
+    group_by(topic, term) %>%
+    arrange(desc(beta)) %>%
+    ungroup() %>%
+    ggplot(aes(beta, term, fill = as.factor(topic))) +
+    geom_col(show.legend = FALSE) +
+    scale_y_reordered() +
+    labs(title = "Top 10 terms in each LDA topic",
+         x = expression(beta), y = NULL) +
+    facet_wrap( ~ topic, ncol = 4, scales = "free")
+```
+
+```{r c8.4.3c, include=TRUE, fig.cap="Probability distribution in topic modeling of NASA metadata description field texts"}
+lda_gamma <- tidy(desc_lda, matrix = "gamma")
+
+lda_gamma %>% 
+    slice_head(n = 10) %>% 
+    kable()
+
+ggplot(lda_gamma, aes(gamma)) +
+    geom_histogram(alpha = 0.8) +
+    scale_y_log10() +
+    labs(title = "Distribution of probabilities for all topics",
+         y = "Number of documents",
+         x = expression(gamma)) +
+    theme_light()
+```
+
+```{r c8.4.3d, include=TRUE, fig.cap="Probability distribution for each topic in topic modeling of NASA metadata description field texts", fig.width=10, fig.height=16, fig.asp=1}
+ggplot(lda_gamma, aes(gamma, fill = as.factor(topic))) +
+    geom_histogram(alpha = 0.8, show.legend = FALSE) +
+    facet_wrap( ~ topic, ncol = 4) +
+    scale_y_log10() +
+    labs(title = "Distribution of probability for each topic",
+         y = "Number of documents",
+         x = expression(gamma)) +
+    theme_light()
+```
+
+A "good" distribution for all topics and individual topics will show a clustering near gamma = 0 - documents that **do not** belong to the topic - and a clustering near gamma = 1 - documents that **do** belong to the topic.
+
+Looking at topic gamma distributions can help in determining the number of topics to model.  Flat distributions with little or no clustering at the extremes indicate that documents are not getting sorted into topics very well.  A lower number might be better.
+
+### Connecting topic modeling with keywords
+
+The topic model data combined with the human-tagged keywords may provide a solid way to identify or gategorize the different topics selected by the model.
+
+```{r c8.4.4a, include=TRUE}
+lda_gamma <- full_join(lda_gamma, nasa_keyword, by = c("document" = "id"))
+
+lda_gamma %>% 
+    slice_head(n = 10) %>% 
+    kable(caption = "Gamma data - the probability that each document belongs in each topic - joined with keywords")
+
+top_keywords <- lda_gamma %>% 
+  filter(gamma > 0.9) %>% 
+  count(topic, keyword, sort = TRUE)
+
+top_keywords %>% 
+    slice_max(n, n = 10, with_ties = FALSE) %>% 
+    kable(caption = "Gamma > 0.9 with keywords")
+```
+
+```{r c8.4.4b, include=TRUE, fig.width=14, fig.height=14, fig.asp=1, fig.cap="Top keywords in topic modeling of NASA metadata description field texts"}
+top_keywords %>%
+    group_by(topic) %>%
+    slice_max(n, n = 5, with_ties = FALSE) %>%
+    ungroup %>%
+    mutate(keyword = reorder_within(keyword, n, topic)) %>%
+    ggplot(aes(n, keyword, fill = as.factor(topic))) +
+    geom_col(show.legend = FALSE) +
+    labs(title = "Top keywords for each LDA topic",
+         x = "Number of documents", y = NULL) +
+    scale_y_reordered() +
+    facet_wrap( ~ topic, ncol = 4, scales = "free")
+```
+
+"By using a combination of network analysis, tf-idf, and topic modeling, we have come to a greater understanding of how datasets are related at NASA. Specifically, we have more information now about how keywords are connected to each other and which datasets are likely to be related. The topic model could be used to suggest keywords based on the words in the description field, or the work on the keywords could suggest the most important combination of keywords for certain areas of study."

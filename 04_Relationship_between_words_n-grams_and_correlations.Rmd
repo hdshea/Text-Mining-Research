@@ -3,9 +3,6 @@ title: "04 Relationships between words: n-grams and correlations"
 author: "H. David Shea"
 date: "`r format(Sys.time(), '%d %b %Y')`"
 output:
-  pdf_document:
-    toc: yes
-    latex_engine: xelatex
   html_document:
     fig.align: center
     fig_caption: yes
@@ -14,6 +11,9 @@ output:
     highlight: tango
     theme: united
     #toc: yes
+  pdf_document:
+    toc: yes
+    latex_engine: xelatex
 ---
 
 ```{r setup, include=FALSE}

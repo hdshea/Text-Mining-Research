@@ -1,0 +1,213 @@
+---
+title: "05 Converting to and from non-tidy formats"
+author: "H. David Shea"
+date: "`r format(Sys.time(), '%d %b %Y')`"
+output:
+  html_document:
+    fig.align: center
+    fig_caption: yes
+    fig_height: 5
+    fig_width: 9
+    highlight: tango
+    theme: united
+    #toc: yes
+  pdf_document:
+    toc: yes
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(knitr)
+library(tidytext)
+library(tm)
+# library(tm.plugin.webmining)
+library(quanteda)
+library(Matrix)
+library(janeaustenr)
+
+knitr::opts_chunk$set(
+    comment = "#>", 
+    collapse = TRUE, 
+    message = FALSE,
+    fig.width = 8,
+    fig.asp = ((1 + sqrt(5)) / 2) - 1, # the golden ratio - technically, the b proportion of a+b when a is 1
+    out.width = "70%",
+    fig.align = "center"
+)
+```
+
+Here we look at converting between tidy text format and other common formats used in text and natural language processing.
+
+## Tidying a document-term matrix
+
+"One of the most common structures that text mining packages work with is the document-term matrix (or DTM). This is a matrix where:
+
+* each row represents one document (such as a book or article),
+* each column represents one term, and
+* each value (typically) contains the number of appearances of that term in that document."
+
+### Tidying DocumentTermMatrix objects
+
+```{r c5.1.1, include=TRUE}
+data("AssociatedPress", package = "topicmodels")
+AssociatedPress
+
+terms <- Terms(AssociatedPress)
+head(terms)
+
+ap_td <- tidy(AssociatedPress)
+ap_td %>%
+    slice_sample(n = 10) %>%
+    kable(caption = "DTM converted to tidy data frame with `tidy()`.")
+
+ap_sentiments <- ap_td %>%
+    inner_join(get_sentiments("bing"), by = c("term" = "word"))
+
+ap_sentiments %>%
+    slice_sample(n = 10) %>%
+    kable(caption = "Tidy formatted DTM joined with `bing` lexicon sentiment data")
+
+ap_sentiments %>%
+    count(sentiment, term, wt = count) %>%
+    ungroup() %>%
+    filter(n >= 200) %>%
+    mutate(n = ifelse(sentiment == "negative",-n, n)) %>%
+    mutate(term = reorder(term, n)) %>%
+    ggplot(aes(n, term, fill = sentiment)) +
+    geom_col() +
+    labs(x = "Contribution to sentiment", y = NULL) +
+    theme_light()
+```
+
+### Tidying `dfm` objects
+
+`dfm` (document-feature matrix) is another common format for text and natural langauge processing - specifically from the `quanteda` package.
+
+```{r c5.1.2a, include=TRUE, warning=FALSE}
+data("data_corpus_inaugural", package = "quanteda")
+inaug_dfm <- dfm(data_corpus_inaugural, verbose = FALSE)
+inaug_dfm
+
+inaug_td <- tidy(inaug_dfm)
+inaug_td %>%
+    slice_sample(n = 10) %>%
+    kable(caption = "`dfm` object containing US President inagural speechees converted to tidy format with `tidy()`.")
+
+inaug_tf_idf <- inaug_td %>%
+    bind_tf_idf(term, document, count) %>%
+    arrange(desc(tf_idf))
+
+inaug_tf_idf %>%
+    slice_max(tf_idf, n = 10) %>%
+    kable(caption = "Highest `tf-idf` values for terms by each US Presidential inauguration speech.")
+```
+
+```{r c5.1.2b, include=TRUE, warning=FALSE, fig.cap="The terms with the highest `tf-idf` from each of four selected inaugural addresses."}
+speeches <- c("1933-Roosevelt",
+              "1861-Lincoln",
+              "1961-Kennedy",
+              "2009-Obama")
+
+inaug_tf_idf %>%
+    filter(document %in% speeches) %>%
+    group_by(document) %>%
+    slice_max(tf_idf, n = 10, with_ties = FALSE) %>%
+    ungroup() %>%
+    mutate(term = reorder_within(term, tf_idf, document)) %>%
+    ggplot(aes(term, tf_idf, fill = document)) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap( ~ document, scales = "free") +
+    coord_flip() +
+    scale_x_reordered() +
+    labs(x = NULL,
+         y = "tf-idf") +
+    theme_light()
+```
+
+```{r c5.1.2c, include=TRUE, warning=FALSE, fig.cap="Changes in word frequency over time within Presidential inaugural addresses, for six selected terms"}
+year_term_counts <- inaug_td %>%
+    extract(document, "year", "(\\d+)", convert = TRUE) %>%
+    complete(year, term, fill = list(count = 0)) %>%
+    group_by(year) %>%
+    mutate(year_total = sum(count))
+
+year_term_counts %>%
+    filter(term %in% c("god", "america", "foreign", "union", "constitution", "freedom")) %>%
+    ggplot(aes(year, count / year_total)) +
+    geom_point() +
+    geom_smooth() +
+    facet_wrap( ~ term, scales = "free_y") +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(y = "% frequency of word in inaugural address") +
+    theme_light()
+```
+
+"These examples show how you can use tidytext, and the related suite of tidy tools, to analyze sources even if their origin was not in a tidy format."
+
+## Casting tidy text data into a matrix
+
+There are three verbs provided in `tidytext` for converting from tidy format to the alternative formats discussed.
+
+* `tidy_dtm()` to `dtm` format
+* `tidy_dfm()` to `dfm` format
+* `tidy_sparse()` to sparse matrix format
+
+```{r c5.2, include=TRUE}
+ap_td %>%
+    cast_dtm(document, term, count)
+
+ap_td %>%
+    cast_dfm(document, term, count)
+
+m <- ap_td %>%
+    cast_sparse(document, term, count)
+
+class(m)
+dim(m)
+
+austen_dtm <- austen_books() %>%
+    unnest_tokens(word, text) %>%
+    count(book, word) %>%
+    cast_dtm(book, word, n)
+
+austen_dtm
+```
+
+## Tidying corpus objects with metadata
+
+Another common format for text is called a "corpus".  These store metadata along with text.  
+
+```{r c5.3, include=TRUE, warning=FALSE}
+data("acq")
+acq
+
+acq[[1]]
+
+acq_td <- tidy(acq)
+acq_td
+
+acq_tokens <- acq_td %>%
+    select(-places) %>%
+    unnest_tokens(word, text) %>%
+    anti_join(stop_words, by = "word")
+
+acq_tokens %>%
+    count(word, sort = TRUE) %>%
+    slice_max(n, n = 10) %>%
+    kable(caption = "Most common words in sampled Reuters articles.")
+
+acq_tokens %>%
+    count(id, word) %>%
+    bind_tf_idf(word, id, n) %>%
+    arrange(desc(tf_idf)) %>%
+    slice_max(tf_idf, n = 10) %>%
+    kable(caption = "Highest tf-idf value words in sampled Reuters articles.")
+```
+
+### Example: mining financial articles
+
+Some JAVA requirement for `tm.plugin.webmining` is not yet implemented for Mac M1 machines (and causes the library loading to hang), so this section will need to await that implementation.
+
+```{r c5.3.1, include=TRUE, warning=FALSE}
+```
